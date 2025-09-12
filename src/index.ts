@@ -34,12 +34,12 @@ app.use('/api/storybook', storybookRoutes);
 app.use('/api/poems', poemsRoutes);
 app.use('/api/revenuecat', revenuecatRoutes);
 
-// Static site at /app
+// Static site at /
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
-app.use('/app', express.static(publicDir));
-app.get('/app', (_req, res) => {
+app.use('/', express.static(publicDir));
+app.get('/', (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
