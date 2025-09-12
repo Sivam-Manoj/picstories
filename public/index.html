@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PicStory Coloring Book</title>
+  <link rel="stylesheet" href="/app/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>PicStory Coloring Book</h1>
+      <p>Generate a simple coloring book PDF using OpenAI for planning and Gemini for images.</p>
+    </header>
+
+    <section class="card">
+      <form id="bookForm">
+        <div class="row">
+          <label for="title">Title</label>
+          <input id="title" name="title" placeholder="My Nano Banana Adventure" required />
+        </div>
+        <div class="row">
+          <label for="prompt">Theme Prompt</label>
+          <textarea id="prompt" name="prompt" rows="4" placeholder="A cute kitten exploring a nano-banana world" required></textarea>
+          <div class="actions" style="margin-top:8px;">
+            <label style="display:flex; align-items:center; gap:8px;">
+              <input type="checkbox" id="enableEnhancer" /> Enable Prompt Enhancer
+            </label>
+            <button id="enhanceThemeBtn" type="button" class="secondary">Enhance Prompt</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="pageCount">Page Count (interior pages only; cover is included automatically)</label>
+          <input id="pageCount" name="pageCount" type="number" min="1" max="30" value="4" required />
+        </div>
+
+        <details class="row">
+          <summary>Advanced planning options</summary>
+          <div class="grid-2" style="margin-top: 10px;">
+            <div class="row">
+              <label for="storyMode">
+                <input type="checkbox" id="storyMode" checked /> Story mode (sequential story)
+              </label>
+            </div>
+            <div class="row">
+              <label for="allowCaptions">
+                <input type="checkbox" id="allowCaptions" checked /> Allow short captions
+              </label>
+            </div>
+            <div class="row">
+              <label for="ageRange">Age Range</label>
+              <select id="ageRange">
+                <option value="">Auto</option>
+                <option value="3-5">3-5</option>
+                <option value="6-8">6-8</option>
+                <option value="9-12">9-12</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="difficulty">Difficulty</label>
+              <select id="difficulty">
+                <option value="">Auto</option>
+                <option value="very-simple">Very simple</option>
+                <option value="simple" selected>Simple</option>
+                <option value="moderate">Moderate</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="styleHints">Style Hints</label>
+              <input id="styleHints" placeholder="storybook, friendly forest" />
+            </div>
+            <div class="row">
+              <label for="focusCharacters">Focus Characters/Props</label>
+              <input id="focusCharacters" placeholder="Luna the kitten and a nano-banana" />
+            </div>
+            <div class="row" style="grid-column: 1 / -1;">
+              <label for="avoidList">Avoid List (comma-separated)</label>
+              <input id="avoidList" placeholder="weapons, brand logos" />
+            </div>
+          </div>
+        </details>
+        <div class="actions">
+          <button id="generateBtn" type="submit">Generate PDF</button>
+          <button id="startReviewBtn" type="button" class="secondary">Start Review Session</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card" id="statusCard" hidden>
+      <div id="status">Preparing...</div>
+      <div id="loader" class="spinner" aria-hidden="true" hidden></div>
+      <div class="hint">Note: Image generation is sequential for consistency. This can take a few minutes for multiple pages.</div>
+    </section>
+
+    <section class="card" id="resultCard" hidden>
+      <h2>Result</h2>
+      <p id="resultInfo"></p>
+      <div class="actions">
+        <a id="downloadLink" class="btn" href="#" download>Download PDF</a>
+        <button id="downloadBtn" class="secondary">Download Now</button>
+      </div>
+    </section>
+
+    <section class="card" id="recentCard">
+      <h2>Recent Books</h2>
+      <ul id="recentList" class="list"></ul>
+    </section>
+
+    <section class="card" id="reviewCard" hidden>
+      <h2>Review Session</h2>
+      <div id="reviewMeta" class="hint"></div>
+      <div class="review-layout">
+        <aside class="review-list">
+          <ul id="reviewPages" class="list"></ul>
+        </aside>
+        <main class="review-main">
+          <div class="row">
+            <label for="reviewPrompt">Page Prompt</label>
+            <textarea id="reviewPrompt" rows="5"></textarea>
+          </div>
+          <div class="actions">
+            <button id="reviewSavePromptBtn" class="secondary">Save Prompt</button>
+            <button id="reviewGenerateBtn">Generate Image</button>
+            <button id="reviewEnhanceBtn" class="secondary">Enhance</button>
+            <button id="reviewConfirmBtn" class="secondary">Toggle Confirm</button>
+          </div>
+          <div class="review-preview">
+            <img id="reviewImage" alt="Preview" />
+          </div>
+          <div class="row">
+            <label for="replaceFile">Replace Image (optional)</label>
+            <input type="file" id="replaceFile" accept="image/png,image/jpeg" />
+            <div class="actions">
+              <button id="replaceUploadBtn" class="secondary">Upload Replace</button>
+            </div>
+          </div>
+          <div class="actions">
+            <button id="reviewPrevBtn" class="secondary">Previous</button>
+            <button id="reviewNextBtn" class="secondary">Next</button>
+            <div style="flex:1"></div>
+            <button id="reviewFinalizeBtn" class="btn">Finalize Book</button>
+          </div>
+        </main>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app/main.js" type="module"></script>
+</body>
+</html>
