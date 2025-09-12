@@ -3,13 +3,13 @@ import cors from "cors";
 import { assertRequiredEnv, config as appConfig } from "./config/env.js";
 import { connectDB } from "./config/db.js";
 import coloringBookRoutes from "./routes/coloringBook.routes.js";
-import storybookRoutes from './routes/storybook.routes.js';
-import poemsRoutes from './routes/poems.routes.js';
-import authRoutes from './routes/auth.routes.js';
-import revenuecatRoutes from './routes/revenuecat.routes.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { UPLOADS_DIR } from './utils/paths.js';
+import storybookRoutes from "./routes/storybook.routes.js";
+import poemsRoutes from "./routes/poems.routes.js";
+import authRoutes from "./routes/auth.routes.js";
+import revenuecatRoutes from "./routes/revenuecat.routes.js";
+import path from "path";
+import { fileURLToPath } from "url";
+import { UPLOADS_DIR } from "./utils/paths.js";
 
 const app = express();
 const PORT = appConfig.PORT;
@@ -18,8 +18,8 @@ const PORT = appConfig.PORT;
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 
-// Health check / root route
-app.get("/", (_req, res) => {
+// Health check route
+app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     service: "picstory-server",
@@ -28,23 +28,23 @@ app.get("/", (_req, res) => {
 });
 
 // API routes
-app.use('/api/auth', authRoutes);
+app.use("/api/auth", authRoutes);
 app.use("/api/coloring-book", coloringBookRoutes);
-app.use('/api/storybook', storybookRoutes);
-app.use('/api/poems', poemsRoutes);
-app.use('/api/revenuecat', revenuecatRoutes);
+app.use("/api/storybook", storybookRoutes);
+app.use("/api/poems", poemsRoutes);
+app.use("/api/revenuecat", revenuecatRoutes);
 
 // Static site at /
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const publicDir = path.join(__dirname, '..', 'public');
-app.use('/', express.static(publicDir));
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(publicDir, 'index.html'));
+const publicDir = path.join(__dirname, "..", "public");
+app.use("/", express.static(publicDir));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
 });
 
 // Serve generated assets (images, PDFs) under /uploads
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // 404 handler (after routes)
 app.use((_req, res) => {
