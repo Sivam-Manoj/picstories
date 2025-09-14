@@ -5,7 +5,7 @@ import {
   generateImageFromPrompt,
   describeImagesForReference,
 } from "../services/gemini.service.js";
-import { buildPdf, buildPdfWithText } from "../services/pdf.service.js";
+import { buildPdf, buildPdfWithText, buildPdfAtSize } from "../services/pdf.service.js";
 import {
   saveBook,
   getBookPdfById,
@@ -49,9 +49,26 @@ export const createColoringBook = asyncHandler(
     const coverPagePrompt = plan.coverPagePrompt;
     const pagePrompts = plan.items.map((p) => p.prompt);
 
+    // Optional print specification (page size + dpi)
+    const print = (options?.printSpec || options?.print) as
+      | { widthInches?: number; heightInches?: number; dpi?: number; fit?: 'cover' | 'contain' }
+      | undefined;
+    const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+    const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+    const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+    const pxW = Math.round(widthInches * dpi);
+    const pxH = Math.round(heightInches * dpi);
+    const pageWidthPts = Math.round(widthInches * 72);
+    const pageHeightPts = Math.round(heightInches * 72);
+    const fitMode: 'cover' | 'contain' = print?.fit === 'cover' ? 'cover' : 'contain';
+
     // 2) Generate images with Gemini
     // 2a) First page: COLORFUL cover page using coverPagePrompt + extra guidance
-    const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.`;
+    const printExtra = print
+      ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.\n- Keep important content within safe margins; avoid critical details at edges.`
+      : '';
+
+    const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.${printExtra}`;
     const images = [] as Awaited<ReturnType<typeof generateImageFromPrompt>>[];
     let prevImage:
       | Awaited<ReturnType<typeof generateImageFromPrompt>>
@@ -63,7 +80,7 @@ export const createColoringBook = asyncHandler(
     prevImage = coverImage;
 
     // 2b) Interior pages: black-and-white line-art; keep prev image as context for consistency
-    const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.`;
+    const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
     for (const p of pagePrompts) {
       const finalPrompt = p + interiorExtra;
       const lastTwo = images
@@ -75,8 +92,10 @@ export const createColoringBook = asyncHandler(
       prevImage = img;
     }
 
-    // 3) Build a PDF
-    const pdfBytes = await buildPdf(images);
+    // 3) Build a PDF (fixed page size if print specified)
+    const pdfBytes = print
+      ? await buildPdfAtSize(images as any, pageWidthPts, pageHeightPts, fitMode)
+      : await buildPdf(images as any);
 
     // 4) Persist to DB
     const book = await saveBook({
@@ -224,11 +243,21 @@ export const generatePage = asyncHandler(
     // Credits are charged upfront in planSession for coloring books.
 
     const page = idx === 0 ? state.cover : state.items[idx - 1];
-    // Build extra instructions
-    const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${state.title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.`;
-    const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.`;
-    const finalPrompt =
-      idx === 0 ? page.prompt + coverExtra : page.prompt + interiorExtra;
+    // Build extra instructions + optional print hints
+    const print = (state.options?.printSpec || state.options?.print) as
+      | { widthInches?: number; heightInches?: number; dpi?: number }
+      | undefined;
+    const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+    const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+    const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+    const pxW = Math.round(widthInches * dpi);
+    const pxH = Math.round(heightInches * dpi);
+    const printExtra = print
+      ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.`
+      : '';
+    const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${state.title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.${printExtra}`;
+    const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
+    const finalPrompt = idx === 0 ? page.prompt + coverExtra : page.prompt + interiorExtra;
 
     // Visual context: optional per-page user image + session references + last generated images (up to 3 total)
     const prev = await getLastPrevImages(id, idx, 2);
@@ -350,13 +379,27 @@ export const finalizeSession = asyncHandler(
         .json({ error: "Some pages have no image", missing });
     }
 
-    // Build PDF from stored images
+    // Build PDF from stored images (use fixed page size if provided)
     const images = [] as { buffer: Buffer; mimeType: string }[];
     for (const p of pages) {
       const buf = await fs.readFile(p.imagePath!);
       images.push({ buffer: buf, mimeType: p.mimeType || "image/png" });
     }
-    const pdfBytes = await buildPdf(images as any);
+    const print = (state.options?.printSpec || state.options?.print) as
+      | { widthInches?: number; heightInches?: number; dpi?: number; fit?: 'cover' | 'contain' }
+      | undefined;
+    let pdfBytes: Uint8Array;
+    if (print) {
+      const dpi = Math.max(72, Math.min(1200, Math.floor(print.dpi || 300)));
+      const widthInches = Math.max(1, Math.min(30, Number(print.widthInches || 8.27)));
+      const heightInches = Math.max(1, Math.min(30, Number(print.heightInches || 11.69)));
+      const pageWidthPts = Math.round(widthInches * 72);
+      const pageHeightPts = Math.round(heightInches * 72);
+      const fitMode: 'cover' | 'contain' = print.fit === 'cover' ? 'cover' : 'contain';
+      pdfBytes = await buildPdfAtSize(images as any, pageWidthPts, pageHeightPts, fitMode);
+    } else {
+      pdfBytes = await buildPdf(images as any);
+    }
 
     const doc = await saveBook({
       userId: (req as any).user?.id,

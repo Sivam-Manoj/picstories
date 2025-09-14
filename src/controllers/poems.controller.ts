@@ -15,7 +15,7 @@ import {
   markConfirmed,
   getLastTwoPrevImages,
 } from "../services/session.service.js";
-import { buildPdf, buildPdfWithText } from "../services/pdf.service.js";
+import { buildPdf, buildPdfWithText, buildPdfAtSize, buildPdfWithTextAtSize } from "../services/pdf.service.js";
 import { saveBook } from "../services/book.service.js";
 import { promises as fs } from "fs";
 import { chargeCredits } from '../services/billing.service.js';
@@ -104,7 +104,19 @@ export const generatePage = asyncHandler(
     try { await chargeCredits((req as any).user?.id, 1); } catch (e: any) { return res.status(e?.status || 400).json({ error: e?.message || 'Charge failed' }); }
 
     const page = idx === 0 ? state.cover : state.items[idx - 1];
-    const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.`;
+    // Full-color with optional print hints
+    const print = (state.options?.printSpec || state.options?.print) as
+      | { widthInches?: number; heightInches?: number; dpi?: number }
+      | undefined;
+    const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+    const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+    const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+    const pxW = Math.round(widthInches * dpi);
+    const pxH = Math.round(heightInches * dpi);
+    const printExtra = print
+      ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.`
+      : '';
+    const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.${printExtra}`;
     const finalPrompt = page.prompt + colorExtra;
     const prev = await getLastTwoPrevImages(id, idx);
     const img = await generateImageFromPrompt(
@@ -127,7 +139,18 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   try { await chargeCredits((req as any).user?.id, 1); } catch (e: any) { return res.status(e?.status || 400).json({ error: e?.message || 'Charge failed' }); }
 
   const page = idx === 0 ? state.cover : state.items[idx - 1];
-  const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.`;
+  const print = (state.options?.printSpec || state.options?.print) as
+    | { widthInches?: number; heightInches?: number; dpi?: number }
+    | undefined;
+  const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+  const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+  const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+  const pxW = Math.round(widthInches * dpi);
+  const pxH = Math.round(heightInches * dpi);
+  const printExtra = print
+    ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.`
+    : '';
+  const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.${printExtra}`;
   const basePrompt =
     typeof prompt === "string" && prompt.trim() ? prompt : page.prompt;
   const finalPrompt = basePrompt + colorExtra;
@@ -178,9 +201,22 @@ export const finalizeSession = asyncHandler(
       ...state.items.map((p) => p.text || ""),
     ];
     const hasAnyText = texts.some((t) => !!t && t.trim().length > 0);
-    const pdfBytes = hasAnyText
-      ? await buildPdfWithText(images as any, texts)
-      : await buildPdf(images as any);
+    const print = (state.options?.printSpec || state.options?.print) as
+      | { widthInches?: number; heightInches?: number; dpi?: number; fit?: 'cover' | 'contain' }
+      | undefined;
+    let pdfBytes: Uint8Array;
+    if (print) {
+      const widthInches = Math.max(1, Math.min(30, Number(print.widthInches || 8.27)));
+      const heightInches = Math.max(1, Math.min(30, Number(print.heightInches || 11.69)));
+      const pageWidthPts = Math.round(widthInches * 72);
+      const pageHeightPts = Math.round(heightInches * 72);
+      const fitMode: 'cover' | 'contain' = print.fit === 'cover' ? 'cover' : 'contain';
+      pdfBytes = hasAnyText
+        ? await buildPdfWithTextAtSize(images as any, texts, pageWidthPts, pageHeightPts, fitMode)
+        : await buildPdfAtSize(images as any, pageWidthPts, pageHeightPts, fitMode);
+    } else {
+      pdfBytes = hasAnyText ? await buildPdfWithText(images as any, texts) : await buildPdf(images as any);
+    }
     const doc = await saveBook({
       userId: (req as any).user?.id,
       title: state.title,
