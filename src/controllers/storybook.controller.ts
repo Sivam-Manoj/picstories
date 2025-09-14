@@ -82,6 +82,8 @@ export const enhanceText = asyncHandler(async (req: Request, res: Response) => {
   const { text, kind } = (req.body || {}) as { text?: string; kind?: 'theme'|'cover'|'interior'|'page' };
   if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text is required (string)' });
   const k = (kind === 'cover' || kind === 'interior' || kind === 'page') ? (kind === 'interior' ? 'page' : kind) : 'theme';
+  // Charge 0.25 credits for enhancement
+  try { await chargeCredits((req as any).user?.id, 0.25 as any); } catch (e: any) { return res.status(e?.status || 402).json({ error: e?.message || 'INSUFFICIENT_CREDITS' }); }
   const enhanced = await enhancePromptStorybook(text, k as any);
   return res.json({ enhanced });
 });

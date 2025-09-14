@@ -38,10 +38,10 @@ export const createColoringBook = asyncHandler(
       return res.status(400).json({ error: "prompt is required (string)" });
     }
     const pages = Number(pageCount);
-    if (!pages || pages < 1 || pages > 30) {
+    if (!pages || pages < 1 || pages > 100) {
       return res
         .status(400)
-        .json({ error: "pageCount must be a number between 1 and 30" });
+        .json({ error: "pageCount must be a number between 1 and 100" });
     }
 
     // 1) Ask OpenAI to plan prompts per page (includes cover page prompt)
@@ -148,8 +148,8 @@ export const planSession = asyncHandler(async (req: Request, res: Response) => {
   if (!prompt || typeof prompt !== "string")
     return res.status(400).json({ error: "prompt is required (string)" });
   const pages = Number(pageCount);
-  if (!pages || pages < 1 || pages > 30)
-    return res.status(400).json({ error: "pageCount must be 1..30" });
+  if (!pages || pages < 1 || pages > 100)
+    return res.status(400).json({ error: "pageCount must be 1..100" });
   // Upfront credits charge: cover + interior pages
   try {
     await chargeCredits((req as any).user?.id, 1 + pages);
@@ -476,6 +476,14 @@ export const enhanceText = asyncHandler(async (req: Request, res: Response) => {
   };
   if (!text || typeof text !== "string")
     return res.status(400).json({ error: "text is required (string)" });
+  // Charge 0.25 credits for enhancement
+  try {
+    await chargeCredits((req as any).user?.id, 0.25 as any);
+  } catch (e: any) {
+    return res
+      .status(e?.status || 402)
+      .json({ error: e?.message || "INSUFFICIENT_CREDITS" });
+  }
   const k = kind === "cover" || kind === "interior" ? kind : "theme";
   const enhanced = await enhanceService(text, k);
   return res.json({ enhanced });
