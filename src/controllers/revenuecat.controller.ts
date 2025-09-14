@@ -139,39 +139,39 @@ export async function revenuecatWebhook(req: Request, res: Response) {
   try {
     const payload = req.body || {};
     console.log("payload", payload);
-    const rawType = payload?.event || payload?.type || payload?.event_type;
-    const eventType = String(
-      rawType || inferEventType(payload) || ""
-    ).toUpperCase();
-    // Strengthened idempotency key: prefer provided id, else transaction_id + type, else a composite fallback
-    let eventId = payload?.event_id || payload?.id || null;
+    // Normalized nested event/data wrapper used by RevenueCat v1 webhooks
+    const ev = payload?.event || payload?.data || {};
+    // Read event type from top-level (some templates) or nested event.type (RC v1)
+    const rawType = payload?.type || payload?.event_type || ev?.type;
+    const eventType = String(rawType || inferEventType(payload) || "").toUpperCase();
+    // Strengthened idempotency key: prefer provided id (top-level or nested), else transaction_id + type, else a composite fallback
+    let eventId = payload?.event_id || payload?.id || ev?.event_id || ev?.id || null;
     if (!eventId) {
       const tx =
         payload?.transaction_id ||
-        (payload?.event || payload?.data || {})?.transaction_id;
+        ev?.transaction_id;
       if (tx) eventId = `${tx}:${eventType}`;
     }
     if (!eventId) {
-      const stamp = payload?.event_timestamp_ms || Date.now();
+      const stamp = payload?.event_timestamp_ms || ev?.event_timestamp_ms || Date.now();
       const auid =
         payload?.app_user_id ||
-        (payload?.event || payload?.data || {})?.app_user_id ||
+        ev?.app_user_id ||
+        payload?.appUserId ||
+        ev?.appUserId ||
+        payload?.original_app_user_id ||
+        ev?.original_app_user_id ||
         "";
-      const pid = payload?.new_product_id || payload?.product_id || "";
+      const pid = payload?.new_product_id || ev?.new_product_id || payload?.product_id || ev?.product_id || "";
       eventId = `${auid}:${pid}:${eventType}:${stamp}`;
     }
 
     let granting = isGrantingEvent(eventType);
     if (!granting) {
-      const ev = payload?.event || payload?.data || {};
       const hasPurchaseSignals = !!(
-        ev?.purchased_at_ms ||
-        payload?.purchased_at_ms ||
-        typeof (ev?.renewal_number ?? payload?.renewal_number) === "number" ||
-        ev?.price ||
-        payload?.price ||
-        ev?.price_in_purchased_currency ||
-        payload?.price_in_purchased_currency
+        ev?.purchased_at_ms || payload?.purchased_at_ms ||
+        typeof (ev?.renewal_number ?? payload?.renewal_number) === 'number' ||
+        ev?.price || payload?.price || ev?.price_in_purchased_currency || payload?.price_in_purchased_currency
       );
       if (hasPurchaseSignals) granting = true; // Fallback for integrations that omit explicit type but include purchase signals
     }
@@ -192,8 +192,16 @@ export async function revenuecatWebhook(req: Request, res: Response) {
     }
 
     // App user id is provided by the client as a custom App User ID
+    // RevenueCat may send it under event.app_user_id (v1) or top-level; also consider original_app_user_id
     const appUserId: string | undefined =
-      payload?.app_user_id || payload?.appUserId;
+      payload?.app_user_id ||
+      ev?.app_user_id ||
+      payload?.appUserId ||
+      ev?.appUserId ||
+      payload?.original_app_user_id ||
+      ev?.original_app_user_id ||
+      // Fallback to first alias if present
+      (Array.isArray(ev?.aliases) && ev.aliases.length ? ev.aliases[0] : undefined);
     if (!appUserId) {
       return res.status(400).json({ error: "Missing app_user_id" });
     }
