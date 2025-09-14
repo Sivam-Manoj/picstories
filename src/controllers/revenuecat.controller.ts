@@ -132,6 +132,7 @@ function isGrantingEvent(eventType?: string) {
 export async function revenuecatWebhook(req: Request, res: Response) {
   try {
     const payload = req.body || {};
+    console.log("payload", payload);
     const eventType = payload?.event || payload?.type || payload?.event_type;
     const eventId = getEventId(payload);
 

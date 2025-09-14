@@ -9,9 +9,8 @@ function verifySecret(req: any, res: any, next: any) {
   if (!secret) return next();
   const auth = (req.headers["authorization"] as string) || "";
   // Accept either raw secret or Bearer <secret>
-  const token = auth?.startsWith("Bearer ")
-    ? auth.slice("Bearer ".length).trim()
-    : auth.trim();
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  const token = m ? m[1].trim() : auth.trim();
   if (token && token === secret) return next();
   return res.status(401).json({ error: "Unauthorized" });
 }
