@@ -33,45 +33,39 @@ const PRODUCT_MAP: Record<"lite" | "pro" | "elite", Set<string>> = {
 };
 const ENTITLEMENT_MAP: Record<"lite" | "pro" | "elite", Set<string>> = {
   lite: new Set(
-    (process.env.RC_ENTITLEMENTS_LITE || "")
+    (process.env.RC_ENTITLEMENTS_LITE || "lite")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean)
   ),
   pro: new Set(
-    (process.env.RC_ENTITLEMENTS_PRO || "")
+    (process.env.RC_ENTITLEMENTS_PRO || "pro")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean)
   ),
   elite: new Set(
-    (process.env.RC_ENTITLEMENTS_ELITE || "")
+    (process.env.RC_ENTITLEMENTS_ELITE || "elite")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean)
   ),
 };
 
-function getEventId(payload: any): string | null {
-  return (
-    payload?.event_id ||
-    payload?.id ||
-    (payload?.transaction_id &&
-      `${payload.transaction_id}:${payload?.event || payload?.type || ""}`) ||
-    null
-  );
-}
-
 function detectTier(payload: any): "lite" | "pro" | "elite" | null {
   // RevenueCat webhooks can nest identifiers under payload.event.* depending on template
   const ev = payload?.event || payload?.data || {};
 
-  const productId: string =
+  // Prefer new_product_id when present (PRODUCT_CHANGE), otherwise fall back to product_id
+  const newProductId: string =
+    payload?.new_product_id || ev?.new_product_id || "";
+  const baseProductId: string =
     payload?.product_id ||
     payload?.productIdentifier ||
     ev?.product_id ||
     ev?.productIdentifier ||
     "";
+  const productId: string = newProductId || baseProductId;
 
   const entitlementIdPrimary: string =
     payload?.entitlement_id ||
@@ -129,15 +123,62 @@ function isGrantingEvent(eventType?: string) {
   );
 }
 
+function inferEventType(payload: any): string | undefined {
+  const ev = payload?.event || payload?.data || {};
+  const newProductId = payload?.new_product_id || ev?.new_product_id;
+  const renewalNumber = payload?.renewal_number ?? ev?.renewal_number;
+  if (newProductId) return "PRODUCT_CHANGE";
+  if (typeof renewalNumber === "number") {
+    return renewalNumber > 0 ? "RENEWAL" : "INITIAL_PURCHASE";
+  }
+  if (payload?.product_id || ev?.product_id) return "INITIAL_PURCHASE";
+  return undefined;
+}
+
 export async function revenuecatWebhook(req: Request, res: Response) {
   try {
     const payload = req.body || {};
     console.log("payload", payload);
-    const eventType = payload?.event || payload?.type || payload?.event_type;
-    const eventId = getEventId(payload);
+    const rawType = payload?.event || payload?.type || payload?.event_type;
+    const eventType = String(
+      rawType || inferEventType(payload) || ""
+    ).toUpperCase();
+    // Strengthened idempotency key: prefer provided id, else transaction_id + type, else a composite fallback
+    let eventId = payload?.event_id || payload?.id || null;
+    if (!eventId) {
+      const tx =
+        payload?.transaction_id ||
+        (payload?.event || payload?.data || {})?.transaction_id;
+      if (tx) eventId = `${tx}:${eventType}`;
+    }
+    if (!eventId) {
+      const stamp = payload?.event_timestamp_ms || Date.now();
+      const auid =
+        payload?.app_user_id ||
+        (payload?.event || payload?.data || {})?.app_user_id ||
+        "";
+      const pid = payload?.new_product_id || payload?.product_id || "";
+      eventId = `${auid}:${pid}:${eventType}:${stamp}`;
+    }
 
-    if (!isGrantingEvent(eventType)) {
-      return res.status(200).json({ ok: true, skipped: true });
+    let granting = isGrantingEvent(eventType);
+    if (!granting) {
+      const ev = payload?.event || payload?.data || {};
+      const hasPurchaseSignals = !!(
+        ev?.purchased_at_ms ||
+        payload?.purchased_at_ms ||
+        typeof (ev?.renewal_number ?? payload?.renewal_number) === "number" ||
+        ev?.price ||
+        payload?.price ||
+        ev?.price_in_purchased_currency ||
+        payload?.price_in_purchased_currency
+      );
+      if (hasPurchaseSignals) granting = true; // Fallback for integrations that omit explicit type but include purchase signals
+    }
+    if (!granting) {
+      return res
+        .status(200)
+        .json({ ok: true, skipped: true, reason: "non_granting_event" });
     }
 
     // Idempotency: avoid double-processing retries
@@ -150,15 +191,14 @@ export async function revenuecatWebhook(req: Request, res: Response) {
       }
     }
 
-    // App user id is set by the client with Purchases.logIn(user.id)
+    // App user id is provided by the client as a custom App User ID
     const appUserId: string | undefined =
       payload?.app_user_id || payload?.appUserId;
     if (!appUserId) {
       return res.status(400).json({ error: "Missing app_user_id" });
     }
 
-    const tier =
-      detectTier(payload) || detectTier(payload?.product_identifier) || null;
+    const tier = detectTier(payload);
     if (!tier) {
       // If unknown product/tier, ignore gracefully
       return res
@@ -186,7 +226,9 @@ export async function revenuecatWebhook(req: Request, res: Response) {
       } catch {}
     }
 
-    return res.status(200).json({ ok: true, granted: creditsToGrant, tier });
+    return res
+      .status(200)
+      .json({ ok: true, granted: creditsToGrant, tier, eventType });
   } catch (e: any) {
     console.error("RevenueCat webhook error", e);
     return res.status(500).json({ error: "Internal Server Error" });
