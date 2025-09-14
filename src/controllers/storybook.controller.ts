@@ -150,7 +150,12 @@ export const generatePage = asyncHandler(async (req: Request, res: Response) => 
     }
     if (buf) combo.unshift({ buffer: buf, mimeType: mt });
   }
-  const img = await generateImageFromPrompt(finalPrompt, combo.length ? { previousImages: combo } : undefined);
+  const img = await generateImageFromPrompt(
+    finalPrompt,
+    (combo.length
+      ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'storybook' as const } }
+      : { printSpec: { widthInches, heightInches, dpi, useCase: 'storybook' as const } }) as any
+  );
   const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
   return res.json({ session: toPublicSession(stored.state) });
 });
@@ -197,7 +202,10 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
       }
       if (ub) combo.unshift({ buffer: ub, mimeType: umt });
     }
-    img = await generateImageFromPrompt(finalPrompt, { previousImages: combo });
+    img = await generateImageFromPrompt(
+      finalPrompt,
+      { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'storybook' as const } } as any
+    );
   } else {
     const prev = await getLastPrevImages(id, idx, 3);
     const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
@@ -211,7 +219,12 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
       }
       if (ub) combo.unshift({ buffer: ub, mimeType: umt });
     }
-    img = await generateImageFromPrompt(finalPrompt, combo.length ? { previousImages: combo } : undefined);
+    img = await generateImageFromPrompt(
+      finalPrompt,
+      (combo.length
+        ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'storybook' as const } }
+        : { printSpec: { widthInches, heightInches, dpi, useCase: 'storybook' as const } }) as any
+    );
   }
 
   const stored = await storePageImage(id, idx, img.buffer, img.mimeType);

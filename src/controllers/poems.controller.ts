@@ -121,7 +121,9 @@ export const generatePage = asyncHandler(
     const prev = await getLastTwoPrevImages(id, idx);
     const img = await generateImageFromPrompt(
       finalPrompt,
-      prev.length ? { previousImages: prev } : undefined
+      (prev.length
+        ? { previousImages: prev, printSpec: { widthInches, heightInches, dpi, useCase: 'poems' as const } }
+        : { printSpec: { widthInches, heightInches, dpi, useCase: 'poems' as const } }) as any
     );
     const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
     return res.json({ session: toPublicSession(stored.state) });
@@ -158,14 +160,17 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   let img;
   if (page.imagePath) {
     const buf = await fs.readFile(page.imagePath);
-    img = await generateImageFromPrompt(finalPrompt, {
-      previousImage: { buffer: buf, mimeType: page.mimeType },
-    });
+    img = await generateImageFromPrompt(
+      finalPrompt,
+      { previousImage: { buffer: buf, mimeType: page.mimeType }, printSpec: { widthInches, heightInches, dpi, useCase: 'poems' as const } } as any
+    );
   } else {
     const prev = await getLastTwoPrevImages(id, idx);
     img = await generateImageFromPrompt(
       finalPrompt,
-      prev.length ? { previousImages: prev } : undefined
+      (prev.length
+        ? { previousImages: prev, printSpec: { widthInches, heightInches, dpi, useCase: 'poems' as const } }
+        : { printSpec: { widthInches, heightInches, dpi, useCase: 'poems' as const } }) as any
     );
   }
   const stored = await storePageImage(id, idx, img.buffer, img.mimeType);

@@ -74,7 +74,8 @@ export const createColoringBook = asyncHandler(
       | Awaited<ReturnType<typeof generateImageFromPrompt>>
       | undefined;
     const coverImage = await generateImageFromPrompt(
-      coverPagePrompt + coverExtra
+      coverPagePrompt + coverExtra,
+      { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' } }
     );
     images.push(coverImage);
     prevImage = coverImage;
@@ -86,8 +87,9 @@ export const createColoringBook = asyncHandler(
       const lastTwo = images
         .slice(-2)
         .map((im) => ({ buffer: im.buffer, mimeType: im.mimeType }));
-      const opts = lastTwo.length ? { previousImages: lastTwo } : undefined;
-      const img = await generateImageFromPrompt(finalPrompt, opts);
+      const baseOpts = { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } };
+      const opts = lastTwo.length ? { ...baseOpts, previousImages: lastTwo } : baseOpts;
+      const img = await generateImageFromPrompt(finalPrompt, opts as any);
       images.push(img);
       prevImage = img;
     }
@@ -287,7 +289,9 @@ export const generatePage = asyncHandler(
     }
     const img = await generateImageFromPrompt(
       finalPrompt,
-      combo.length ? { previousImages: combo } : undefined
+      (combo.length
+        ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
+        : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
     );
 
     const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
@@ -309,12 +313,22 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   // Credits are charged upfront in planSession for coloring books.
 
   const page = idx === 0 ? state.cover : state.items[idx - 1];
-  const basePrompt =
-    typeof prompt === "string" && prompt.trim() ? prompt : page.prompt;
-  const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${state.title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.`;
-  const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.`;
-  const finalPrompt =
-    idx === 0 ? basePrompt + coverExtra : basePrompt + interiorExtra;
+  // Include printSpec in edit stage as well
+  const print = (state.options?.printSpec || state.options?.print) as
+    | { widthInches?: number; heightInches?: number; dpi?: number }
+    | undefined;
+  const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+  const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+  const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+  const pxW = Math.round(widthInches * dpi);
+  const pxH = Math.round(heightInches * dpi);
+  const printExtra = print
+    ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.`
+    : '';
+  const basePrompt = typeof prompt === "string" && prompt.trim() ? prompt : page.prompt;
+  const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${state.title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.${printExtra}`;
+  const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
+  const finalPrompt = idx === 0 ? basePrompt + coverExtra : basePrompt + interiorExtra;
 
   // Build context: current page (if any), optional per-page user image, plus session refs/recent outputs
   let img;
@@ -349,7 +363,9 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   }
   img = await generateImageFromPrompt(
     finalPrompt,
-    combo.length ? { previousImages: combo } : undefined
+    (combo.length
+      ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
+      : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
   );
 
   const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
