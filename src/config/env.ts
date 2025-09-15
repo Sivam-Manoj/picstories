@@ -16,6 +16,7 @@ export const config = {
   JWT_REFRESH_EXPIRES_IN: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   RESEND_API_KEY: process.env.RESEND_API_KEY || '',
   EMAIL_FROM: process.env.EMAIL_FROM || 'PicStory <no-reply@sellsnap.co.uk>',
+  APPLE_BUNDLE_ID: process.env.APPLE_BUNDLE_ID || 'com.picstories.app',
 } as const;
 
 export function assertRequiredEnv() {
@@ -26,6 +27,7 @@ export function assertRequiredEnv() {
   if (!config.JWT_ACCESS_SECRET) missing.push('JWT_ACCESS_SECRET');
   if (!config.JWT_REFRESH_SECRET) missing.push('JWT_REFRESH_SECRET');
   if (!config.RESEND_API_KEY) console.warn('RESEND_API_KEY not set: email verification will be disabled');
+  if (!config.APPLE_BUNDLE_ID) console.warn('APPLE_BUNDLE_ID not set: Apple Sign-In will be disabled');
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }

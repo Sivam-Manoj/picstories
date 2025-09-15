@@ -38,10 +38,10 @@ export const createColoringBook = asyncHandler(
       return res.status(400).json({ error: "prompt is required (string)" });
     }
     const pages = Number(pageCount);
-    if (!pages || pages < 1 || pages > 100) {
+    if (!pages || pages < 1 || pages > 150) {
       return res
         .status(400)
-        .json({ error: "pageCount must be a number between 1 and 100" });
+        .json({ error: "pageCount must be a number between 1 and 150" });
     }
 
     // 1) Ask OpenAI to plan prompts per page (includes cover page prompt)
@@ -138,6 +138,53 @@ function sanitizeFileName(name: string) {
   return name.replace(/[^a-zA-Z0-9_-]+/g, "_");
 }
 
+// Internal: background generation for an entire session (cover + interiors)
+async function backgroundGenerateAll(id: string): Promise<void> {
+  const state = await loadSession(id);
+  if (!state) return;
+  const print = (state.options?.printSpec || state.options?.print) as
+    | { widthInches?: number; heightInches?: number; dpi?: number }
+    | undefined;
+  const dpi = Math.max(72, Math.min(1200, Math.floor(print?.dpi || 300)));
+  const widthInches = Math.max(1, Math.min(30, Number(print?.widthInches || 8.27)));
+  const heightInches = Math.max(1, Math.min(30, Number(print?.heightInches || 11.69)));
+  const pxW = Math.round(widthInches * dpi);
+  const pxH = Math.round(heightInches * dpi);
+  const printExtra = print
+    ? `\n\nPrint specifications:\n- Target page size: ${widthInches.toFixed(2)}x${heightInches.toFixed(2)} inches at ${dpi} DPI (≈ ${pxW}×${pxH} px).\n- Compose for portrait orientation and print readability.`
+    : '';
+  const coverExtra = `\n\nAdditional cover instructions:\n- Full COLOR, vibrant and attractive composition.\n- Include the exact book title text: "${state.title}" as part of the design (e.g., nice typography).\n- Portrait orientation, polished layout, visually appealing for kids.\n- Do NOT render as black-and-white or line-art.${printExtra}`;
+  const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
+
+  const total = 1 + state.pageCount;
+  for (let i = 0; i < total; i++) {
+    try {
+      const cur = await loadSession(id);
+      if (!cur) break;
+      const page = i === 0 ? cur.cover : cur.items[i - 1];
+      if (page.imagePath) continue;
+      const finalPrompt = i === 0 ? page.prompt + coverExtra : page.prompt + interiorExtra;
+      const prev = await getLastPrevImages(id, i, 2);
+      const refs = await getContextImageBuffers(id);
+      const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+      const img = await generateImageFromPrompt(
+        finalPrompt,
+        (combo.length
+          ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
+          : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
+      );
+      // Concurrency guard: if user already generated/edited this page while we were working, don't overwrite
+      const after = await loadSession(id);
+      if (!after) break;
+      const afterPage = i === 0 ? after.cover : after.items[i - 1];
+      if (afterPage.imagePath) continue;
+      await storePageImage(id, i, img.buffer, img.mimeType);
+    } catch (e) {
+      console.warn('Background generate page failed:', { id, page: i, error: (e as any)?.message || e });
+    }
+  }
+}
+
 // ============ REVIEW WORKFLOW (SESSION-BASED) ============
 
 export const planSession = asyncHandler(async (req: Request, res: Response) => {
@@ -148,8 +195,8 @@ export const planSession = asyncHandler(async (req: Request, res: Response) => {
   if (!prompt || typeof prompt !== "string")
     return res.status(400).json({ error: "prompt is required (string)" });
   const pages = Number(pageCount);
-  if (!pages || pages < 1 || pages > 100)
-    return res.status(400).json({ error: "pageCount must be 1..100" });
+  if (!pages || pages < 1 || pages > 150)
+    return res.status(400).json({ error: "pageCount must be 1..150" });
   // Upfront credits charge: cover + interior pages
   try {
     await chargeCredits((req as any).user?.id, 1 + pages);
@@ -209,6 +256,17 @@ export const planSession = asyncHandler(async (req: Request, res: Response) => {
     } catch {}
   }
 
+  // Kick off background generation of all pages (cover + interiors) without blocking the response
+  try {
+    setImmediate(() => {
+      backgroundGenerateAll(session.id).catch((err: unknown) => {
+        console.error('Background generation failed for session', session.id, err);
+      });
+    });
+  } catch (e) {
+    console.warn('Failed to schedule background generation:', e);
+  }
+
   return res.status(201).json({ session: toPublicSession(session) });
 });
 
@@ -234,8 +292,9 @@ export const updatePrompt = asyncHandler(
 export const generatePage = asyncHandler(
   async (req: Request, res: Response) => {
     const { id, index } = req.params as { id: string; index: string };
-    const { contextImage } = (req.body || {}) as {
+    const { contextImage, async: asyncMode } = (req.body || {}) as {
       contextImage?: { dataUrl?: string; base64?: string; mimeType?: string };
+      async?: boolean;
     };
     const idx = Number(index);
     const state = await loadSession(id);
@@ -287,23 +346,38 @@ export const generatePage = asyncHandler(
       }
       if (buf) combo.unshift({ buffer: buf, mimeType: mt });
     }
-    const img = await generateImageFromPrompt(
-      finalPrompt,
-      (combo.length
-        ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
-        : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
-    );
+    const doWork = async () => {
+      const img = await generateImageFromPrompt(
+        finalPrompt,
+        (combo.length
+          ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
+          : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
+      );
+      // Concurrency guard: re-check before storing
+      const after = await loadSession(id);
+      if (!after) return;
+      const afterPage = idx === 0 ? after.cover : after.items[idx - 1];
+      if (afterPage.imagePath) return; // someone else wrote an image
+      await storePageImage(id, idx, img.buffer, img.mimeType);
+    };
 
-    const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
-    return res.json({ session: toPublicSession(stored.state) });
+    if (asyncMode) {
+      try { setImmediate(() => { doWork().catch((e) => console.warn('async generate page failed', e)); }); } catch {}
+      return res.json({ session: toPublicSession(state) });
+    } else {
+      await doWork();
+      const latest = await loadSession(id);
+      return res.json({ session: toPublicSession(latest!) });
+    }
   }
 );
 
 export const editPage = asyncHandler(async (req: Request, res: Response) => {
   const { id, index } = req.params as { id: string; index: string };
-  const { prompt, contextImage } = (req.body || {}) as {
+  const { prompt, contextImage, async: asyncMode } = (req.body || {}) as {
     prompt?: string;
     contextImage?: { dataUrl?: string; base64?: string; mimeType?: string };
+    async?: boolean;
   };
   const idx = Number(index);
   const state = await loadSession(id);
@@ -361,15 +435,29 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
     const buf = await fs.readFile(page.imagePath);
     combo.unshift({ buffer: buf, mimeType: page.mimeType });
   }
-  img = await generateImageFromPrompt(
-    finalPrompt,
-    (combo.length
-      ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
-      : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
-  );
+  const doWork = async () => {
+    const out = await generateImageFromPrompt(
+      finalPrompt,
+      (combo.length
+        ? { previousImages: combo, printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }
+        : { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } }) as any
+    );
+    // Concurrency guard
+    const after = await loadSession(id);
+    if (!after) return;
+    const afterPage = idx === 0 ? after.cover : after.items[idx - 1];
+    if (afterPage.imagePath && page.imagePath !== afterPage.imagePath) return;
+    await storePageImage(id, idx, out.buffer, out.mimeType);
+  };
 
-  const stored = await storePageImage(id, idx, img.buffer, img.mimeType);
-  return res.json({ session: toPublicSession(stored.state) });
+  if (asyncMode) {
+    try { setImmediate(() => { doWork().catch((e) => console.warn('async edit page failed', e)); }); } catch {}
+    return res.json({ session: toPublicSession(state) });
+  } else {
+    await doWork();
+    const latest = await loadSession(id);
+    return res.json({ session: toPublicSession(latest!) });
+  }
 });
 
 export const confirmPage = asyncHandler(async (req: Request, res: Response) => {

@@ -3,7 +3,9 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { User } from '../models/User.js';
 import { hashPassword, verifyPassword, hashString, verifyHash } from '../services/hash.service.js';
 import { signAccessToken, signRefreshToken, verifyRefresh } from '../utils/jwt.js';
-import { sendVerificationEmail } from '../services/email.service.js';
+import { sendVerificationEmail, sendWelcomeEmail } from '../services/email.service.js';
+import { verifyAppleIdentityToken } from '../services/apple.service.js';
+import { config } from '../config/env.js';
 
 function genCode(len = 6) {
   const n = Math.floor(Math.random() * 10 ** len).toString().padStart(len, '0');
@@ -86,6 +88,8 @@ export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
   const refresh = signRefreshToken({ sub: String(user._id), email: user.email });
   user.refreshTokenHash = await hashString(refresh);
   await user.save();
+  // Send a welcome email on first successful verification (non-blocking)
+  try { await sendWelcomeEmail(user.email, user.name).catch(() => {}); } catch {}
   return res.json({ user: sanitizeUser(user), accessToken: access, refreshToken: refresh });
 });
 
@@ -128,6 +132,17 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
   return res.json({ user: sanitizeUser(user) });
 });
 
+export const updateProfile = asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req as any).user?.id as string | undefined;
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+  const { name } = req.body || {};
+  const user = await User.findById(userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (typeof name === 'string') user.name = name.trim();
+  await user.save();
+  return res.json({ user: sanitizeUser(user) });
+});
+
 export const deleteAccount = asyncHandler(async (req: Request, res: Response) => {
   const userId = (req as any).user?.id as string | undefined;
   if (!userId) return res.status(401).json({ error: 'Unauthorized' });
@@ -144,4 +159,60 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
     await user.save();
   }
   return res.json({ ok: true });
+});
+
+// ==== Apple Sign-In ====
+export const appleSignIn = asyncHandler(async (req: Request, res: Response) => {
+  const { identityToken, fullName, email: emailFromBody } = req.body || {};
+  if (!identityToken) return res.status(400).json({ error: 'identityToken required' });
+  if (!config.APPLE_BUNDLE_ID) return res.status(500).json({ error: 'Server missing APPLE_BUNDLE_ID' });
+
+  // Verify token with Apple and extract stable subject and optional email
+  const claims = await verifyAppleIdentityToken(identityToken);
+  const appleSub = String(claims.sub);
+  const email = (claims.email as string | undefined) || (emailFromBody as string | undefined);
+
+  // Find by provider first
+  let user = await User.findOne({ providers: { $elemMatch: { provider: 'apple', providerId: appleSub } } });
+
+  // If not found via provider, try by email (Apple sometimes only provides email on first sign-in)
+  if (!user && email) {
+    user = await User.findOne({ email });
+  }
+
+  // If still not found, create a new user
+  if (!user) {
+    const providers = [{ provider: 'apple' as const, providerId: appleSub }];
+    const fallbackName = fullName?.toString().trim() || (email ? email.split('@')[0] : 'Friend');
+    user = await User.create({
+      email: email || `${appleSub}@priv.apple.local`,
+      name: fallbackName,
+      verified: true,
+      providers,
+      credits: 10,
+    });
+    // Send welcome email for newly created Apple accounts when we have a real email
+    if (email) { try { await sendWelcomeEmail(email, fallbackName).catch(() => {}); } catch {} }
+  } else {
+    // Link provider if missing
+    const hasApple = (user.providers || []).some((p) => p.provider === 'apple' && p.providerId === appleSub);
+    if (!hasApple) {
+      user.providers = [...(user.providers || []), { provider: 'apple', providerId: appleSub }];
+    }
+    // If user has no name yet and client provided one OR we can derive from email, set it once
+    if (!user.name || user.name.trim().length === 0) {
+      const derived = fullName?.toString().trim() || (user.email ? user.email.split('@')[0] : undefined);
+      if (derived) user.name = derived;
+    }
+    // Treat Apple auth as verified email
+    if (!user.verified) user.verified = true;
+    await user.save();
+  }
+
+  const access = signAccessToken({ sub: String(user._id), email: user.email });
+  const refresh = signRefreshToken({ sub: String(user._id), email: user.email });
+  user.refreshTokenHash = await hashString(refresh);
+  await user.save();
+
+  return res.json({ user: sanitizeUser(user), accessToken: access, refreshToken: refresh });
 });
