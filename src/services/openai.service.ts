@@ -128,6 +128,28 @@ export interface PlanOptions {
 
 const openai = new OpenAI({ apiKey: config.OPENAI_API_KEY });
 
+function cameraComplexityHints(
+  difficulty?: "very-simple" | "simple" | "moderate",
+  ageRange?: string
+): string {
+  // Parse youngest age in a range like "3-5" or "6–8"
+  let minAge: number | undefined = undefined;
+  if (typeof ageRange === "string") {
+    const m = ageRange.match(/(\d{1,2})\s*[–-]/);
+    if (m) minAge = Number(m[1]);
+  }
+  const veryYoung = typeof minAge === "number" ? minAge <= 5 : false;
+
+  if (difficulty === "very-simple" || veryYoung) {
+    return `\n- COMPLEXITY TUNING:\n  - Prefer CLOSE-UP or MEDIUM-CLOSE shots; mostly eye-level, centered or simple composition.\n  - Keep backgrounds extremely minimal (very few large shapes). Avoid complex perspective.\n  - One primary character with a single, clear action; avoid crowd scenes.\n  - Emphasize large, bold outlines and big colorable areas.`;
+  }
+  if (difficulty === "simple") {
+    return `\n- COMPLEXITY TUNING:\n  - Prefer MEDIUM shots; eye-level or slight low/high angles; use rule-of-thirds when helpful.\n  - Backgrounds remain simple with 2–3 large environment elements that may evolve across pages.\n  - Typically 1–2 characters; avoid tiny details and busy textures.`;
+  }
+  // moderate or unspecified
+  return `\n- COMPLEXITY TUNING:\n  - Mix MEDIUM and occasional WIDE shots; use rule-of-thirds; sparing low/high angles for drama.\n  - Backgrounds can show clear environmental change but remain uncluttered and readable.\n  - 1–3 characters max per page; keep key identity props consistent; avoid micro details.`;
+}
+
 export async function generatePagePrompts(
   title: string,
   basePrompt: string,
@@ -157,6 +179,7 @@ export async function generatePagePrompts(
     ? `Main characters/props: ${options.focusCharacters}.`
     : "";
   const avoid = options?.avoidList ? `Avoid: ${options.avoidList}.` : "";
+  const tuningHints = cameraComplexityHints(options?.difficulty, options?.ageRange);
 
   const system = `You are the planning engine for a kids coloring STORYBOOK. Produce a complete visual plan as STRICT JSON.
 
@@ -166,10 +189,22 @@ export async function generatePagePrompts(
   - Therefore, EACH interior page prompt must be SELF-CONTAINED and repeat essential identity/style cues (e.g., character species/name, signature clothing/props, environment vibe) so visual consistency is maintained.
   - Cover page is rendered separately in FULL COLOR using "coverPagePrompt"; interior pages are rendered in BLACK-and-WHITE line art.
   - The image generator is invoked INDEX-BY-INDEX (cover first, then 1..${pageCount}). Write each prompt as a clear, production-ready IMAGE GENERATION PROMPT that can be used directly without additional rewriting.
-  - Do NOT write meta commentary or instructions to humans. Write concrete visual directives: key subject(s), pose or action, composition/framing, background simplicity, and any required recurring identity cues.
+  - Do NOT write meta commentary or instructions to humans. Write concrete visual directives only.
   - Ensure strong sequence/continuity across pages: the story should progress meaningfully while preserving consistent character identity, scale, props, and setting vibe.
 
+- INTERIOR PAGE PROMPT REQUIREMENTS (very important):
+  - Describe SUBJECT + ACTION succinctly.
+  - Specify CAMERA framing and VIEWPOINT: choose one (close-up / medium / wide) and one viewpoint (eye-level / low-angle / high-angle), and mention composition/framing (rule-of-thirds vs centered).
+  - Specify CHARACTER DIRECTION and POSE explicitly (e.g., "facing left and walking toward the forest", "profile view to the right", "looking up and waving").
+  - Include a concise BACKGROUND/ENVIRONMENT that EVOLVES across pages (e.g., forest clearing → riverside → village gate), yet remains simple and uncluttered for coloring.
+  - Add a one-sentence CONTINUITY CUE in each prompt (e.g., "the same kitten with a tiny ribbon and nano-banana").
+  - Maintain consistent SCALE and relative positions; keep the main character prominent.
+  - Strict line-art constraints: BLACK-and-WHITE only, thick outlines, high contrast, no shading, minimal background detail, no text overlays.
+
 - OUTPUT FORMAT (STRICT JSON, no extra keys, no comments, no markdown):
+ ${tuningHints}
+
+ - OUTPUT FORMAT (STRICT JSON, no extra keys, no comments, no markdown):
   {
     "coverPagePrompt": "string",
     "items": [ { "index": 1, "prompt": "string", "caption": "string or null" }, ... ]
@@ -184,17 +219,13 @@ export async function generatePagePrompts(
 - INTERIOR PAGES (BLACK-AND-WHITE LINE-ART):
   - Provide exactly ${pageCount} items in the "items" array, indexed 1..${pageCount}.
   - Each "prompt" describes ONE coloring page in simple, high-contrast line-art (BLACK and WHITE only), thick outlines, no shading, minimal background clutter, large simple shapes.
-  - ${
-    storyMode
-      ? "Make the pages read like a sequential story with small, meaningful progression from page to page."
-      : "Pages may be independent but remain thematically coherent."
-  }
+  - ${storyMode ? "Make the pages read like a sequential story with small, meaningful progression from page to page." : "Pages may be independent but remain thematically coherent."}
   - Maintain character/object consistency across pages (same species/character, key props, overall style, scale).
   - Do NOT mention colors in interior prompts; they are for coloring. Avoid text overlays or paragraph text inside the illustration.
-  - EACH interior prompt must restate key identity/style cues in 1 short sentence to help maintain continuity (e.g., "the same kitten with a tiny ribbon and nano-banana").
+  - EACH interior prompt must restate key identity/style cues in 1 short sentence to help maintain continuity.
   - Keep child-safe, friendly tone; avoid violence, brand names, logos, copyrighted characters.
   - Orientation: portrait.
-  - Each prompt should be concise (1–2 sentences), self-contained, and not reference the entire book or other page text.
+  - Each prompt must be concise (1–3 sentences), self-contained, and not reference the entire book or other page text.
   - ${captionsLine}
 
 - THEMATIC COHERENCE:
@@ -209,6 +240,7 @@ export async function generatePagePrompts(
   ${focusChars}
   ${avoid}
   ${referenceLine}
+  ${tuningHints}
 
 - EXAMPLE (FORMAT ONLY — do NOT copy text; adapt to user inputs; ensure items length = ${pageCount}):
   {
@@ -311,11 +343,26 @@ export async function generateStoryImagePrompts(
 
   const system = `You plan a FULL-COLOR children's STORYBOOK as STRICT JSON for an image generator.
 
-- Cover and all interior pages are FULL COLOR, kid-friendly, portrait orientation.
-- EACH page prompt must be SELF-CONTAINED with key identity/style cues for continuity.
-- Write direct IMAGE GENERATION PROMPTS (subject, action, composition, continuity cues). No human meta commentary.
+- SYSTEM CONTEXT:
+  - Pages are rendered sequentially (cover, then 1..${pageCount}).
+  - The image model receives only the current page prompt plus up to the last TWO generated images as visual context.
+  - Therefore EACH interior prompt must be SELF-CONTAINED and restate essential identity/style cues (main character name/species, signature clothing/props, environment vibe) for visual continuity.
 
-OUTPUT JSON ONLY:
+- COVER + INTERIOR PAGES:
+  - All pages are FULL COLOR, kid-friendly, portrait orientation.
+  - Write direct IMAGE GENERATION PROMPTS only. No meta commentary or human instructions.
+  - Ensure strong sequence/continuity across pages; the story should progress meaningfully while preserving consistent character identity, scale, props, and setting vibe.
+
+- PER-PAGE PROMPT REQUIREMENTS (very important):
+  - SUBJECT + ACTION succinctly.
+  - CAMERA framing + VIEWPOINT: pick one (close-up / medium / wide) and one viewpoint (eye-level / low-angle / high-angle); mention composition (rule-of-thirds vs centered).
+  - CHARACTER DIRECTION + POSE explicitly (e.g., "facing left and running toward the river", "profile view to the right", "looking up and waving").
+  - BACKGROUND/ENVIRONMENT: include concise details that EVOLVE across pages (e.g., forest path → rickety bridge → cozy village) while staying readable and uncluttered.
+  - CONTINUITY CUE: add one short clause that restates identity/style props (e.g., "the same kitten with the tiny ribbon and nano-banana").
+  - Maintain consistent SCALE and relative positions; keep the main character prominent and readable.
+  - Avoid heavy text overlays; keep composition clear, with safe margins.
+
+OUTPUT JSON ONLY (STRICT, no extra keys/comments/markdown):
 {
   "coverPagePrompt": "string",
   "items": [ { "index": 1, "prompt": "string", "caption": null }, ... ]

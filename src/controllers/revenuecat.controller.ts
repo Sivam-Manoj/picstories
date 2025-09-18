@@ -31,6 +31,43 @@ const PRODUCT_MAP: Record<"lite" | "pro" | "elite", Set<string>> = {
       .filter(Boolean)
   ),
 };
+
+// One-time credit packs for NON_RENEWING_PURCHASE events
+// Environment override RC_NON_RENEWING_PACKS supports comma-separated pairs: sku=credits,sku2=credits
+// Example: RC_NON_RENEWING_PACKS=com.picstories.pro.starter=60,com.picstories.pro.ultra=200
+const DEFAULT_PACK_CREDITS: Record<string, number> = {
+  'com.picstories.pro.starter': 60,
+  'com.picstories.pro.ultra': 200,
+  'com.picstories.pro.credits': 30,
+};
+
+function parsePackCreditsEnv(): Record<string, number> {
+  const out: Record<string, number> = {};
+  const raw = process.env.RC_NON_RENEWING_PACKS || '';
+  for (const part of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+    const eq = part.indexOf('=');
+    if (eq > 0) {
+      const key = part.slice(0, eq).trim();
+      const val = Number(part.slice(eq + 1).trim());
+      if (key && Number.isFinite(val) && val > 0) out[key] = val;
+    }
+  }
+  return out;
+}
+
+function getPackCreditsForProduct(payload: any): { productId: string | undefined; credits: number | null } {
+  const ev = payload?.event || payload?.data || {};
+  const productId: string | undefined =
+    payload?.product_id || payload?.productIdentifier || ev?.product_id || ev?.productIdentifier;
+  const overrides = parsePackCreditsEnv();
+  if (productId && Object.prototype.hasOwnProperty.call(overrides, productId)) {
+    return { productId, credits: overrides[productId] };
+  }
+  if (productId && Object.prototype.hasOwnProperty.call(DEFAULT_PACK_CREDITS, productId)) {
+    return { productId, credits: DEFAULT_PACK_CREDITS[productId] };
+  }
+  return { productId, credits: null };
+}
 const ENTITLEMENT_MAP: Record<"lite" | "pro" | "elite", Set<string>> = {
   lite: new Set(
     (process.env.RC_ENTITLEMENTS_LITE || "lite")
@@ -206,14 +243,29 @@ export async function revenuecatWebhook(req: Request, res: Response) {
       return res.status(400).json({ error: "Missing app_user_id" });
     }
 
-    const tier = detectTier(payload);
-    if (!tier) {
-      // If unknown product/tier, ignore gracefully
-      return res
-        .status(200)
-        .json({ ok: true, skipped: true, reason: "unknown_tier" });
+    // Special handling: one-time packs
+    if (eventType === 'NON_RENEWING_PURCHASE') {
+      const { productId, credits } = getPackCreditsForProduct(payload);
+      if (!credits) {
+        return res.status(200).json({ ok: true, skipped: true, reason: 'unknown_pack', productId });
+      }
+      const user = await User.findById(appUserId);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      user.credits = Math.max(0, (user.credits || 0) + credits);
+      await user.save();
+      if (eventId) {
+        try {
+          await ProcessedEvent.create({ eventId, source: 'revenuecat', processedAt: new Date() });
+        } catch {}
+      }
+      return res.status(200).json({ ok: true, granted: credits, kind: 'pack', productId, eventType });
     }
 
+    // Subscription-style (tiers)
+    const tier = detectTier(payload);
+    if (!tier) {
+      return res.status(200).json({ ok: true, skipped: true, reason: 'unknown_tier' });
+    }
     const creditsToGrant = creditsForTier(tier);
 
     const user = await User.findById(appUserId);
@@ -234,9 +286,7 @@ export async function revenuecatWebhook(req: Request, res: Response) {
       } catch {}
     }
 
-    return res
-      .status(200)
-      .json({ ok: true, granted: creditsToGrant, tier, eventType });
+    return res.status(200).json({ ok: true, granted: creditsToGrant, tier, eventType });
   } catch (e: any) {
     console.error("RevenueCat webhook error", e);
     return res.status(500).json({ error: "Internal Server Error" });

@@ -54,6 +54,18 @@ async function resolveSizeKeyFromOptions(opts?: any): Promise<string | undefined
   return undefined;
 }
 
+function devLogSizeRefSelected(where: string, ctx: { sessionId?: string; page?: number | string; sizeKey?: string | undefined; found?: boolean }) {
+  try {
+    if (process.env.NODE_ENV !== 'development') return;
+    console.log(`[sizeRef] ${where}`, {
+      sessionId: ctx.sessionId,
+      page: ctx.page,
+      sizeKey: ctx.sizeKey || 'none',
+      found: !!ctx.found,
+    });
+  } catch {}
+}
+
 async function loadSizeRefBuffer(opts?: any): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
     const key = await resolveSizeKeyFromOptions(opts);
@@ -125,7 +137,9 @@ export const createColoringBook = asyncHandler(
     let prevImage:
       | Awaited<ReturnType<typeof generateImageFromPrompt>>
       | undefined;
+    const sizeKey = await resolveSizeKeyFromOptions(options);
     const sizeRef = await loadSizeRefBuffer(options);
+    devLogSizeRefSelected('coloring.create.cover', { page: 0, sizeKey, found: !!sizeRef });
     const coverOpts: any = { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } };
     if (sizeRef) coverOpts.previousImages = [sizeRef];
     const coverImage = await generateImageFromPrompt(
@@ -137,7 +151,8 @@ export const createColoringBook = asyncHandler(
 
     // 2b) Interior pages: black-and-white line-art; keep prev image as context for consistency
     const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
-    for (const p of pagePrompts) {
+    for (let pi = 0; pi < pagePrompts.length; pi++) {
+      const p = pagePrompts[pi];
       const finalPrompt = p + interiorExtra;
       const lastTwo = images
         .slice(-2)
@@ -147,6 +162,7 @@ export const createColoringBook = asyncHandler(
       if (sizeRef) prevs.push(sizeRef);
       if (lastTwo.length) prevs.push(...lastTwo);
       const opts = prevs.length ? { ...baseOpts, previousImages: prevs } : baseOpts;
+      devLogSizeRefSelected('coloring.create.page', { page: pi + 1, sizeKey, found: !!sizeRef });
       const img = await generateImageFromPrompt(finalPrompt, opts as any);
       images.push(img);
       prevImage = img;
@@ -219,6 +235,7 @@ async function backgroundGenerateAll(id: string): Promise<void> {
   const interiorExtra = `\n\nAdditional interior instructions:\n- Render as simple, high-contrast BLACK-AND-WHITE line-art (no shading).\n- Keep characters/objects consistent with previous page.\n- Minimal or no background clutter.${printExtra}`;
 
   const total = 1 + state.pageCount;
+  const sizeKeyBg = await resolveSizeKeyFromOptions(state.options);
   for (let i = 0; i < total; i++) {
     try {
       const cur = await loadSession(id);
@@ -229,6 +246,7 @@ async function backgroundGenerateAll(id: string): Promise<void> {
       const prev = await getLastPrevImages(id, i, 2);
       const refs = await getContextImageBuffers(id);
       const sizeRef = await loadSizeRefBuffer(state.options);
+      devLogSizeRefSelected('coloring.background.page', { sessionId: id, page: i, sizeKey: sizeKeyBg, found: !!sizeRef });
       const combo: { buffer: Buffer; mimeType?: string }[] = [];
       if (sizeRef) combo.push(sizeRef);
       combo.push(...prev, ...refs);
@@ -388,10 +406,12 @@ export const generatePage = asyncHandler(
     // Visual context: optional per-page user image + session references + last generated images (up to 3 total)
     const prev = await getLastPrevImages(id, idx, 2);
     const refs = await getContextImageBuffers(id);
+    const sizeKeyGen = await resolveSizeKeyFromOptions(state.options);
     const sizeRef = await loadSizeRefBuffer(state.options);
     const combo: { buffer: Buffer; mimeType?: string }[] = [];
     if (sizeRef) combo.push(sizeRef);
     combo.push(...prev, ...refs);
+    devLogSizeRefSelected('coloring.generate.page', { sessionId: id, page: idx, sizeKey: sizeKeyGen, found: !!sizeRef });
     if (contextImage) {
       let buf: Buffer | null = null;
       let mt = contextImage.mimeType;
@@ -476,10 +496,12 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   let img;
   const refs = await getContextImageBuffers(id);
   const prev = await getLastPrevImages(id, idx, 2);
+  const sizeKeyEdit = await resolveSizeKeyFromOptions(state.options);
   const sizeRef = await loadSizeRefBuffer(state.options);
   const combo: { buffer: Buffer; mimeType?: string }[] = [];
   if (sizeRef) combo.push(sizeRef);
   combo.push(...prev, ...refs);
+  devLogSizeRefSelected('coloring.edit.page', { sessionId: id, page: idx, sizeKey: sizeKeyEdit, found: !!sizeRef });
   if (contextImage) {
     let ub: Buffer | null = null;
     let umt = contextImage.mimeType;

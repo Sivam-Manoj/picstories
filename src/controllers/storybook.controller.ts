@@ -52,6 +52,18 @@ async function resolveSizeKeyFromOptions(opts?: any): Promise<string | undefined
   return undefined;
 }
 
+function devLogSizeRefSelected(where: string, ctx: { sessionId?: string; page?: number | string; sizeKey?: string | undefined; found?: boolean }) {
+  try {
+    if (process.env.NODE_ENV !== 'development') return;
+    console.log(`[sizeRef] ${where}`, {
+      sessionId: ctx.sessionId,
+      page: ctx.page,
+      sizeKey: ctx.sizeKey || 'none',
+      found: !!ctx.found,
+    });
+  } catch {}
+}
+
 async function loadSizeRefBuffer(opts?: any): Promise<{ buffer: Buffer; mimeType: string } | null> {
   try {
     const key = await resolveSizeKeyFromOptions(opts);
@@ -166,6 +178,7 @@ async function backgroundGenerateAll(id: string): Promise<void> {
   const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.${printExtra}`;
 
   const total = 1 + state.pageCount;
+  const sizeKey = await resolveSizeKeyFromOptions(state.options);
   const sizeRef = await loadSizeRefBuffer(state.options);
   for (let i = 0; i < total; i++) {
     try {
@@ -179,6 +192,7 @@ async function backgroundGenerateAll(id: string): Promise<void> {
       const combo: { buffer: Buffer; mimeType?: string }[] = [];
       if (sizeRef) combo.push(sizeRef);
       combo.push(...prev, ...refs);
+      devLogSizeRefSelected('storybook.background.page', { sessionId: id, page: i, sizeKey, found: !!sizeRef });
       const img = await generateImageFromPrompt(
         finalPrompt,
         (combo.length
@@ -411,7 +425,12 @@ export const generatePage = asyncHandler(
     // Visual context: recent outputs + user references (prefer to include refs among last three)
     const prev = await getLastPrevImages(id, idx, 3);
     const refs = await getContextImageBuffers(id);
-    const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+    const sizeKeyGen = await resolveSizeKeyFromOptions(state.options);
+    const sizeRef = await loadSizeRefBuffer(state.options);
+    const combo: { buffer: Buffer; mimeType?: string }[] = [];
+    if (sizeRef) combo.push(sizeRef);
+    combo.push(...prev, ...refs);
+    devLogSizeRefSelected('storybook.generate.page', { sessionId: id, page: idx, sizeKey: sizeKeyGen, found: !!sizeRef });
     if (contextImage) {
       let buf: Buffer | null = null;
       let mt = contextImage.mimeType;
@@ -533,6 +552,7 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   const finalPrompt = basePrompt + colorExtra;
 
   const refs = await getContextImageBuffers(id);
+  const sizeKeyEdit = await resolveSizeKeyFromOptions(state.options);
   const sizeRef = await loadSizeRefBuffer(state.options);
   const buildCombo = async (): Promise<
     { buffer: Buffer; mimeType?: string }[]
@@ -553,6 +573,7 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
     }
   };
   let combo = await buildCombo();
+  devLogSizeRefSelected('storybook.edit.page', { sessionId: id, page: idx, sizeKey: sizeKeyEdit, found: !!sizeRef });
   if (contextImage) {
     let ub: Buffer | null = null;
     let umt = contextImage.mimeType;

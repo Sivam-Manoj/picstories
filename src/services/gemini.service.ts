@@ -18,11 +18,14 @@ function buildSystemInstruction(spec?: PrintSpec) {
   const widthInches = Math.max(1, Math.min(30, Number(spec?.widthInches || 8.27)));
   const heightInches = Math.max(1, Math.min(30, Number(spec?.heightInches || 11.69)));
   const useCase = (spec?.useCase || 'children\'s picture/colouring/story book pages for print').trim();
+  const isSquare = Math.abs(widthInches - heightInches) <= 0.05;
+  const orientation = isSquare ? 'square' : 'portrait';
   return [
     `You are generating images for print-ready ${useCase}.`,
     `Target page size: ${widthInches.toFixed(2)}×${heightInches.toFixed(2)} inches at ${dpi} DPI.`,
-    `Compose for portrait orientation unless square. Keep important content within safe margins; avoid placing critical details at the very edges.`,
+    `Compose for ${orientation} orientation. Keep important content within safe margins; avoid placing critical details at the very edges.`,
     `Ensure clean, crisp lines and high contrast where appropriate; avoid artifacts, banding, or heavy compression.`,
+    `If an inline size reference image is provided as the first image part, treat it as a CANVAS/ASPECT guide only; do not copy its content. Align composition and framing to that aspect ratio and margins.`,
     `Return the image as inline image data (PNG preferred). Do not return descriptive text unless you cannot produce an image.`,
   ].join("\n");
 }
@@ -71,10 +74,21 @@ export async function generateImageFromPrompt(
 ): Promise<GeneratedImage> {
   const requestParts: any[] = [];
 
-  // Add up to the last THREE previous images as inline context FIRST
+  // Add previous images as inline context FIRST.
+  // Keep the FIRST image (assumed size reference if provided) and the LAST TWO for continuity.
   if (opts?.previousImages && opts.previousImages.length > 0) {
-    const lastThree = opts.previousImages.slice(-3);
-    for (const img of lastThree) {
+    const src = opts.previousImages;
+    let selected: { buffer: Buffer; mimeType?: string }[];
+    if (src.length <= 3) {
+      selected = src;
+    } else {
+      const first = src[0];
+      const penultimate = src[src.length - 2];
+      const last = src[src.length - 1];
+      const tmp = [first, penultimate, last];
+      selected = tmp.filter((v, i, a) => a.indexOf(v) === i);
+    }
+    for (const img of selected) {
       const mimeType = img.mimeType || "image/png";
       const data = img.buffer.toString("base64");
       requestParts.push({ inlineData: { mimeType, data } });
