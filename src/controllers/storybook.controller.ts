@@ -30,6 +30,50 @@ import {
 } from "../services/pdf.service.js";
 import { saveBook } from "../services/book.service.js";
 import { promises as fs } from "fs";
+import archiver from "archiver";
+
+// ===== Helpers to include a size reference image as context =====
+async function resolveSizeKeyFromOptions(opts?: any): Promise<string | undefined> {
+  const s =
+    (opts?.printSpec?.sizeKey as string | undefined) ||
+    (opts?.print?.sizeKey as string | undefined) ||
+    (opts?.sizeKey as string | undefined);
+  if (s && typeof s === 'string') return s;
+  const w = Number(opts?.printSpec?.widthInches || opts?.print?.widthInches);
+  const h = Number(opts?.printSpec?.heightInches || opts?.print?.heightInches);
+  if (w && h) {
+    const eq = (a: number, b: number) => Math.abs(a - b) <= 0.15;
+    if ((eq(w, 8.27) && eq(h, 11.69)) || (eq(w, 11.69) && eq(h, 8.27))) return 'a4sheet';
+    if ((eq(w, 8.5) && eq(h, 11)) || (eq(w, 11) && eq(h, 8.5))) return 'usLetter';
+    if ((eq(w, 5.83) && eq(h, 8.27)) || (eq(w, 8.27) && eq(h, 5.83))) return 'a5sheet';
+    if (eq(w, 8) && eq(h, 8)) return '8x8in';
+    if ((eq(w, 7) && eq(h, 10)) || (eq(w, 10) && eq(h, 7))) return '7x10in';
+  }
+  return undefined;
+}
+
+async function loadSizeRefBuffer(opts?: any): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  try {
+    const key = await resolveSizeKeyFromOptions(opts);
+    if (!key) return null;
+    const candidates = [
+      require('path').resolve(process.cwd(), 'public', 'imageSize', `${key}.png`),
+      require('path').resolve(process.cwd(), 'server', 'public', 'imageSize', `${key}.png`),
+    ];
+    const fsAny = require('fs') as typeof import('fs');
+    let found: string | undefined;
+    for (const p of candidates) {
+      try {
+        if (p && fsAny.existsSync(p)) { found = p; break; }
+      } catch {}
+    }
+    if (!found) return null;
+    const buf = await (await import('fs')).promises.readFile(found);
+    return { buffer: buf, mimeType: 'image/png' };
+  } catch {
+    return null;
+  }
+}
 
 export const generateStorybook = asyncHandler(
   async (req: Request, res: Response) => {
@@ -46,6 +90,49 @@ export const generateStorybook = asyncHandler(
       length === "medium" || length === "long" ? length : "short";
     const out = await generateStorybookText(title, prompt, len);
     return res.json({ title: out.title, story: out.story });
+  }
+);
+
+// ============ Download all session images as ZIP ============
+export const downloadSessionImagesZip = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const state = await loadSession(id);
+    if (!state) return res.status(404).json({ error: "Session not found" });
+    const pages = [state.cover, ...state.items];
+    const missing = pages.filter((p) => !p.imagePath).map((p) => p.index);
+    if (missing.length) {
+      return res
+        .status(400)
+        .json({ error: "Some pages have no image", missing });
+    }
+
+    const base = (state.title || "picstory").replace(/[^a-zA-Z0-9_-]+/g, "_");
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${base}-images.zip"`
+    );
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (err: any) => {
+      console.error("zip error", err);
+      try {
+        if (!res.headersSent) res.status(500);
+        res.end();
+      } catch {}
+    });
+    archive.pipe(res);
+    for (const p of pages) {
+      if (!p.imagePath) continue;
+      const ext = p.mimeType?.includes("png")
+        ? "png"
+        : p.mimeType?.includes("jpg") || p.mimeType?.includes("jpeg")
+        ? "jpg"
+        : "png";
+      const name = `page-${String(p.index).padStart(2, "0")}.${ext}`;
+      archive.file(p.imagePath, { name });
+    }
+    archive.finalize();
   }
 );
 
@@ -79,6 +166,7 @@ async function backgroundGenerateAll(id: string): Promise<void> {
   const colorExtra = `\n\nFull COLOR, kid-friendly, portrait orientation. Clean, readable composition.${printExtra}`;
 
   const total = 1 + state.pageCount;
+  const sizeRef = await loadSizeRefBuffer(state.options);
   for (let i = 0; i < total; i++) {
     try {
       const cur = await loadSession(id);
@@ -88,7 +176,9 @@ async function backgroundGenerateAll(id: string): Promise<void> {
       const finalPrompt = page.prompt + colorExtra;
       const prev = await getLastPrevImages(id, i, 3);
       const refs = await getContextImageBuffers(id);
-      const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+      const combo: { buffer: Buffer; mimeType?: string }[] = [];
+      if (sizeRef) combo.push(sizeRef);
+      combo.push(...prev, ...refs);
       const img = await generateImageFromPrompt(
         finalPrompt,
         (combo.length
@@ -443,16 +533,23 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   const finalPrompt = basePrompt + colorExtra;
 
   const refs = await getContextImageBuffers(id);
+  const sizeRef = await loadSizeRefBuffer(state.options);
   const buildCombo = async (): Promise<
     { buffer: Buffer; mimeType?: string }[]
   > => {
     if (page.imagePath) {
       const buf = await fs.readFile(page.imagePath);
       const prev = await getLastPrevImages(id, idx, 2);
-      return [{ buffer: buf, mimeType: page.mimeType }, ...prev, ...refs];
+      const base: { buffer: Buffer; mimeType?: string }[] = [];
+      if (sizeRef) base.push(sizeRef);
+      base.push({ buffer: buf, mimeType: page.mimeType }, ...prev, ...refs);
+      return base;
     } else {
       const prev = await getLastPrevImages(id, idx, 3);
-      return [...prev, ...refs];
+      const base: { buffer: Buffer; mimeType?: string }[] = [];
+      if (sizeRef) base.push(sizeRef);
+      base.push(...prev, ...refs);
+      return base;
     }
   };
   let combo = await buildCombo();

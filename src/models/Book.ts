@@ -7,7 +7,8 @@ export interface BookDocument extends Document {
   pageCount: number;
   pagePrompts: string[];
   pdf?: Buffer; // optional for backward compatibility
-  pdfPath: string; // filesystem path to the generated PDF
+  pdfPath?: string; // filesystem path to the generated PDF (optional if using R2)
+  pdfUrl?: string; // public URL on R2
   createdAt: Date;
   updatedAt: Date;
 }
@@ -20,7 +21,8 @@ const BookSchema = new Schema<BookDocument>(
     pageCount: { type: Number, required: true, min: 1 },
     pagePrompts: { type: [String], required: true },
     pdf: { type: Buffer, required: false },
-    pdfPath: { type: String, required: true },
+    pdfPath: { type: String, required: false },
+    pdfUrl: { type: String, required: false },
   },
   { timestamps: true }
 );

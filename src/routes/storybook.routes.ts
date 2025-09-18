@@ -11,6 +11,7 @@ import {
   replacePageImage,
   updateText,
   enhanceText,
+  downloadSessionImagesZip,
 } from '../controllers/storybook.controller.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -27,5 +28,6 @@ router.patch('/sessions/:id/pages/:index/text', requireAuth, updateText);
 router.post('/sessions/:id/pages/:index/confirm', requireAuth, confirmPage);
 router.post('/sessions/:id/pages/:index/replace', requireAuth, replacePageImage);
 router.post('/sessions/:id/finalize', requireAuth, finalizeSession);
+router.get('/sessions/:id/download-images', downloadSessionImagesZip);
 
 export default router;

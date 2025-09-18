@@ -16,7 +16,7 @@ const PORT = appConfig.PORT;
 
 // Global middleware
 app.use(cors());
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "100mb" }));
 
 // Health check route
 app.get("/health", (_req, res) => {

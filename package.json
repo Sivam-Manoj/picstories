@@ -17,12 +17,15 @@
   "type": "module",
   "dependencies": {
     "@google/genai": "^1.18.0",
+    "archiver": "^7.0.1",
+    "aws-sdk": "^2.1692.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
     "jose": "^6.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.1",
+    "multer": "^2.0.2",
     "openai": "^5.20.0",
     "pdf-lib": "^1.17.1"
   },

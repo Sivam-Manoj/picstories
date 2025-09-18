@@ -2,6 +2,7 @@ import { Book } from '../models/Book.js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { ROOT_DIR, UPLOADS_DIR } from '../utils/paths.js';
+import { uploadBufferToR2 } from '../utils/r2Upload.js';
 
 function slugify(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -15,15 +16,46 @@ export async function saveBook(params: {
   pagePrompts: string[];
   pdfBytes: Uint8Array;
 }) {
-  // Ensure uploads directory exists
-  await fs.mkdir(UPLOADS_DIR, { recursive: true });
-
   const ts = Date.now();
   const base = slugify(params.title) || 'book';
   const filename = `${base}-${ts}.pdf`;
-  const absPath = path.join(UPLOADS_DIR, filename);
+  const r2Bucket = process.env.R2_BUCKET_NAME;
+  const domain = process.env.DOMAIN;
 
-  await fs.writeFile(absPath, Buffer.from(params.pdfBytes));
+  let pdfPath: string | undefined;
+  let pdfUrl: string | undefined;
+
+  // Try R2 first if configured
+  if (r2Bucket) {
+    try {
+      const key = `uploads/pdf/${filename}`;
+      const loc = await uploadBufferToR2(Buffer.from(params.pdfBytes), r2Bucket, key, 'application/pdf');
+      pdfUrl = domain ? `https://${domain}/${key}` : loc;
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[DEV] R2 PDF upload OK', { key, url: pdfUrl, bytes: (params.pdfBytes as any)?.length });
+      }
+    } catch (e: any) {
+      console.warn('R2 upload failed for PDF, falling back to local fs:', e?.message || e);
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[DEV] Falling back to local PDF write', { filename });
+      }
+    }
+  } else {
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[DEV] R2 disabled for PDF (missing R2_BUCKET_NAME). Will write local file.', { filename });
+    }
+  }
+
+  // Fallback to local filesystem if needed or desired
+  if (!pdfUrl) {
+    await fs.mkdir(UPLOADS_DIR, { recursive: true });
+    const absPath = path.join(UPLOADS_DIR, filename);
+    await fs.writeFile(absPath, Buffer.from(params.pdfBytes));
+    pdfPath = absPath;
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[DEV] Local PDF written', { path: absPath });
+    }
+  }
 
   const doc = await Book.create({
     user: params.userId as any,
@@ -31,15 +63,19 @@ export async function saveBook(params: {
     basePrompt: params.basePrompt,
     pageCount: params.pageCount,
     pagePrompts: params.pagePrompts,
-    pdfPath: absPath,
+    ...(pdfPath ? { pdfPath } : {}),
+    ...(pdfUrl ? { pdfUrl } : {}),
   });
   return doc;
 }
 
 export async function getBookPdfById(id: string) {
-  const doc = await Book.findById(id).select('pdfPath title');
+  const doc = await Book.findById(id).select('pdfPath pdfUrl title');
   if (!doc) return null;
-  return { path: (doc as any).pdfPath as string, title: doc.title };
+  const anyDoc = doc as any;
+  const pathOrNull: string | undefined = anyDoc.pdfPath || undefined;
+  const urlOrNull: string | undefined = anyDoc.pdfUrl || undefined;
+  return { path: pathOrNull, url: urlOrNull, title: doc.title };
 }
 
 export async function listRecentBooks(limit = 10, userId?: string) {

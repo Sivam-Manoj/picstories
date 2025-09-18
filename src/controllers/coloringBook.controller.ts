@@ -25,7 +25,59 @@ import {
   getContextImageBuffers,
 } from "../services/session.service.js";
 import { promises as fs } from "fs";
+import archiver from "archiver";
 import { chargeCredits } from "../services/billing.service.js";
+
+// ===== Helpers to include a size reference image as context =====
+async function resolveSizeKeyFromOptions(opts?: any): Promise<string | undefined> {
+  const s =
+    (opts?.printSpec?.sizeKey as string | undefined) ||
+    (opts?.print?.sizeKey as string | undefined) ||
+    (opts?.sizeKey as string | undefined);
+  if (s && typeof s === 'string') return s;
+  // Try to infer from inches
+  const w = Number(opts?.printSpec?.widthInches || opts?.print?.widthInches);
+  const h = Number(opts?.printSpec?.heightInches || opts?.print?.heightInches);
+  if (w && h) {
+    const eq = (a: number, b: number) => Math.abs(a - b) <= 0.15; // ~0.15in tolerance
+    // A4 8.27 x 11.69
+    if ((eq(w, 8.27) && eq(h, 11.69)) || (eq(w, 11.69) && eq(h, 8.27))) return 'a4sheet';
+    // US Letter 8.5 x 11
+    if ((eq(w, 8.5) && eq(h, 11)) || (eq(w, 11) && eq(h, 8.5))) return 'usLetter';
+    // A5 5.83 x 8.27
+    if ((eq(w, 5.83) && eq(h, 8.27)) || (eq(w, 8.27) && eq(h, 5.83))) return 'a5sheet';
+    // 8x8
+    if (eq(w, 8) && eq(h, 8)) return '8x8in';
+    // 7x10
+    if ((eq(w, 7) && eq(h, 10)) || (eq(w, 10) && eq(h, 7))) return '7x10in';
+  }
+  return undefined;
+}
+
+async function loadSizeRefBuffer(opts?: any): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  try {
+    const key = await resolveSizeKeyFromOptions(opts);
+    if (!key) return null;
+    const candidates = [
+      require('path').resolve(process.cwd(), 'public', 'imageSize', `${key}.png`),
+      require('path').resolve(process.cwd(), 'server', 'public', 'imageSize', `${key}.png`),
+    ];
+    const fsAny = require('fs') as typeof import('fs');
+    let found: string | undefined;
+    for (const p of candidates) {
+      try {
+        if (p && fsAny.existsSync(p)) {
+          found = p; break;
+        }
+      } catch {}
+    }
+    if (!found) return null;
+    const buf = await (await import('fs')).promises.readFile(found);
+    return { buffer: buf, mimeType: 'image/png' };
+  } catch {
+    return null;
+  }
+}
 
 export const createColoringBook = asyncHandler(
   async (req: Request, res: Response) => {
@@ -73,9 +125,12 @@ export const createColoringBook = asyncHandler(
     let prevImage:
       | Awaited<ReturnType<typeof generateImageFromPrompt>>
       | undefined;
+    const sizeRef = await loadSizeRefBuffer(options);
+    const coverOpts: any = { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } };
+    if (sizeRef) coverOpts.previousImages = [sizeRef];
     const coverImage = await generateImageFromPrompt(
       coverPagePrompt + coverExtra,
-      { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' } }
+      coverOpts
     );
     images.push(coverImage);
     prevImage = coverImage;
@@ -87,8 +142,11 @@ export const createColoringBook = asyncHandler(
       const lastTwo = images
         .slice(-2)
         .map((im) => ({ buffer: im.buffer, mimeType: im.mimeType }));
-      const baseOpts = { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } };
-      const opts = lastTwo.length ? { ...baseOpts, previousImages: lastTwo } : baseOpts;
+      const baseOpts: any = { printSpec: { widthInches, heightInches, dpi, useCase: 'coloring-book' as const } };
+      const prevs: { buffer: Buffer; mimeType?: string }[] = [];
+      if (sizeRef) prevs.push(sizeRef);
+      if (lastTwo.length) prevs.push(...lastTwo);
+      const opts = prevs.length ? { ...baseOpts, previousImages: prevs } : baseOpts;
       const img = await generateImageFromPrompt(finalPrompt, opts as any);
       images.push(img);
       prevImage = img;
@@ -119,7 +177,11 @@ export const downloadPdf = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const book = await getBookPdfById(id);
   if (!book) return res.status(404).json({ error: "Not found" });
-
+  // If stored on R2, redirect to the public URL
+  if (book.url) {
+    return res.redirect(book.url);
+  }
+  if (!book.path) return res.status(404).json({ error: "PDF not available" });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
@@ -166,7 +228,10 @@ async function backgroundGenerateAll(id: string): Promise<void> {
       const finalPrompt = i === 0 ? page.prompt + coverExtra : page.prompt + interiorExtra;
       const prev = await getLastPrevImages(id, i, 2);
       const refs = await getContextImageBuffers(id);
-      const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+      const sizeRef = await loadSizeRefBuffer(state.options);
+      const combo: { buffer: Buffer; mimeType?: string }[] = [];
+      if (sizeRef) combo.push(sizeRef);
+      combo.push(...prev, ...refs);
       const img = await generateImageFromPrompt(
         finalPrompt,
         (combo.length
@@ -323,7 +388,10 @@ export const generatePage = asyncHandler(
     // Visual context: optional per-page user image + session references + last generated images (up to 3 total)
     const prev = await getLastPrevImages(id, idx, 2);
     const refs = await getContextImageBuffers(id);
-    const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+    const sizeRef = await loadSizeRefBuffer(state.options);
+    const combo: { buffer: Buffer; mimeType?: string }[] = [];
+    if (sizeRef) combo.push(sizeRef);
+    combo.push(...prev, ...refs);
     if (contextImage) {
       let buf: Buffer | null = null;
       let mt = contextImage.mimeType;
@@ -408,7 +476,10 @@ export const editPage = asyncHandler(async (req: Request, res: Response) => {
   let img;
   const refs = await getContextImageBuffers(id);
   const prev = await getLastPrevImages(id, idx, 2);
-  const combo: { buffer: Buffer; mimeType?: string }[] = [...prev, ...refs];
+  const sizeRef = await loadSizeRefBuffer(state.options);
+  const combo: { buffer: Buffer; mimeType?: string }[] = [];
+  if (sizeRef) combo.push(sizeRef);
+  combo.push(...prev, ...refs);
   if (contextImage) {
     let ub: Buffer | null = null;
     let umt = contextImage.mimeType;
@@ -553,6 +624,49 @@ export const replacePageImage = asyncHandler(
 
     const stored = await storePageImage(id, idx, buffer, mt);
     return res.json({ session: toPublicSession(stored.state) });
+  }
+);
+
+// ============ Download all session images as ZIP ============
+export const downloadSessionImagesZip = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { id } = req.params as { id: string };
+    const state = await loadSession(id);
+    if (!state) return res.status(404).json({ error: "Session not found" });
+    const pages = [state.cover, ...state.items];
+    const missing = pages.filter((p) => !p.imagePath).map((p) => p.index);
+    if (missing.length) {
+      return res
+        .status(400)
+        .json({ error: "Some pages have no image", missing });
+    }
+
+    const base = sanitizeFileName(state.title || "picstory");
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${base}-images.zip"`
+    );
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (err: any) => {
+      console.error("zip error", err);
+      try {
+        if (!res.headersSent) res.status(500);
+        res.end();
+      } catch {}
+    });
+    archive.pipe(res);
+    for (const p of pages) {
+      if (!p.imagePath) continue;
+      const ext = p.mimeType?.includes("png")
+        ? "png"
+        : p.mimeType?.includes("jpg") || p.mimeType?.includes("jpeg")
+        ? "jpg"
+        : "png";
+      const name = `page-${String(p.index).padStart(2, "0")}.${ext}`;
+      archive.file(p.imagePath, { name });
+    }
+    archive.finalize();
   }
 );
 

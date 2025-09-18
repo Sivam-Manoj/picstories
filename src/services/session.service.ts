@@ -1,12 +1,14 @@
-import { promises as fs } from 'fs';
-import path from 'path';
-import { SESSIONS_DIR, UPLOADS_DIR, toPublicUrl } from '../utils/paths.js';
+import { promises as fs } from "fs";
+import path from "path";
+import { SESSIONS_DIR, UPLOADS_DIR, toPublicUrl } from "../utils/paths.js";
+import { uploadBufferToR2 } from "../utils/r2Upload.js";
 
 export interface SessionPageState {
   index: number; // 0 = cover, 1..N = interior pages
   prompt: string;
   text?: string; // optional story/poem text for this page
   imagePath?: string; // absolute path on disk
+  imageUrl?: string; // public URL (R2)
   mimeType?: string;
   confirmed?: boolean;
 }
@@ -16,7 +18,7 @@ export async function storeContextImages(
   inputs: Array<{ dataUrl?: string; base64?: string; mimeType?: string }>
 ): Promise<SessionState> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const imgDir = sessionImagesDir(id);
   await fs.mkdir(imgDir, { recursive: true });
   const stored: { imagePath: string; mimeType?: string }[] = [];
@@ -24,28 +26,46 @@ export async function storeContextImages(
     const item = inputs[i];
     let buffer: Buffer | null = null;
     let mt = item.mimeType;
-    if (item.dataUrl && typeof item.dataUrl === 'string' && item.dataUrl.startsWith('data:')) {
+    if (
+      item.dataUrl &&
+      typeof item.dataUrl === "string" &&
+      item.dataUrl.startsWith("data:")
+    ) {
       const match = item.dataUrl.match(/^data:([^;]+);base64,(.*)$/);
       if (match) {
         mt = match[1];
-        try { buffer = Buffer.from(match[2], 'base64'); } catch { buffer = null; }
+        try {
+          buffer = Buffer.from(match[2], "base64");
+        } catch {
+          buffer = null;
+        }
       }
-    } else if (item.base64 && typeof item.base64 === 'string') {
-      try { buffer = Buffer.from(item.base64, 'base64'); } catch { buffer = null; }
+    } else if (item.base64 && typeof item.base64 === "string") {
+      try {
+        buffer = Buffer.from(item.base64, "base64");
+      } catch {
+        buffer = null;
+      }
     }
     if (!buffer) continue;
-    const ext = mt?.includes('png') ? 'png' : mt?.includes('jpg') || mt?.includes('jpeg') ? 'jpg' : 'png';
+    const ext = mt?.includes("png")
+      ? "png"
+      : mt?.includes("jpg") || mt?.includes("jpeg")
+      ? "jpg"
+      : "png";
     const filename = `context-${i + 1}-${Date.now()}.${ext}`;
     const absPath = path.join(imgDir, filename);
     await fs.writeFile(absPath, buffer);
-    stored.push({ imagePath: absPath, mimeType: mt || 'image/png' });
+    stored.push({ imagePath: absPath, mimeType: mt || "image/png" });
   }
   state.contextImages = stored.length ? stored : undefined;
   await saveSession(state);
   return state;
 }
 
-export async function getContextImageBuffers(id: string): Promise<{ buffer: Buffer; mimeType?: string }[]> {
+export async function getContextImageBuffers(
+  id: string
+): Promise<{ buffer: Buffer; mimeType?: string }[]> {
   const state = await loadSession(id);
   if (!state || !state.contextImages || !state.contextImages.length) return [];
   const out: { buffer: Buffer; mimeType?: string }[] = [];
@@ -76,11 +96,11 @@ function sessionDir(id: string) {
 }
 
 function sessionStatePath(id: string) {
-  return path.join(sessionDir(id), 'state.json');
+  return path.join(sessionDir(id), "state.json");
 }
 
 function sessionImagesDir(id: string) {
-  return path.join(sessionDir(id), 'images');
+  return path.join(sessionDir(id), "images");
 }
 
 function randomId() {
@@ -119,7 +139,7 @@ export async function createSession(params: {
 
 export async function loadSession(id: string): Promise<SessionState | null> {
   try {
-    const data = await fs.readFile(sessionStatePath(id), 'utf-8');
+    const data = await fs.readFile(sessionStatePath(id), "utf-8");
     return JSON.parse(data) as SessionState;
   } catch (e) {
     return null;
@@ -129,7 +149,11 @@ export async function loadSession(id: string): Promise<SessionState | null> {
 export async function saveSession(state: SessionState): Promise<void> {
   state.updatedAt = Date.now();
   await fs.mkdir(sessionDir(state.id), { recursive: true });
-  await fs.writeFile(sessionStatePath(state.id), JSON.stringify(state, null, 2), 'utf-8');
+  await fs.writeFile(
+    sessionStatePath(state.id),
+    JSON.stringify(state, null, 2),
+    "utf-8"
+  );
 }
 
 export function pageCountTotal(state: SessionState) {
@@ -137,7 +161,7 @@ export function pageCountTotal(state: SessionState) {
 }
 
 export function ensureValidIndex(state: SessionState, idx: number) {
-  if (idx < 0 || idx > state.pageCount) throw new Error('Invalid page index');
+  if (idx < 0 || idx > state.pageCount) throw new Error("Invalid page index");
 }
 
 export function getPage(state: SessionState, idx: number): SessionPageState {
@@ -146,54 +170,123 @@ export function getPage(state: SessionState, idx: number): SessionPageState {
   return state.items[idx - 1];
 }
 
-export async function setPagePrompt(id: string, idx: number, prompt: string): Promise<SessionState> {
+export async function setPagePrompt(
+  id: string,
+  idx: number,
+  prompt: string
+): Promise<SessionState> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const page = getPage(state, idx);
   page.prompt = prompt;
   await saveSession(state);
   return state;
 }
 
-export async function setPageText(id: string, idx: number, text: string): Promise<SessionState> {
+export async function setPageText(
+  id: string,
+  idx: number,
+  text: string
+): Promise<SessionState> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const page = getPage(state, idx);
   page.text = text;
   await saveSession(state);
   return state;
 }
 
-export async function storePageImage(id: string, idx: number, buffer: Buffer, mimeType?: string): Promise<{ state: SessionState; imagePath: string; }>{
+export async function storePageImage(
+  id: string,
+  idx: number,
+  buffer: Buffer,
+  mimeType?: string
+): Promise<{ state: SessionState; imagePath: string }> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const imgDir = sessionImagesDir(id);
   await fs.mkdir(imgDir, { recursive: true });
-  const ext = mimeType?.includes('png') ? 'png' : mimeType?.includes('jpg') || mimeType?.includes('jpeg') ? 'jpg' : 'png';
-  const filename = `page-${idx}-${Date.now()}.${ext}`;
+  const ext = mimeType?.includes("png")
+    ? "png"
+    : mimeType?.includes("jpg") || mimeType?.includes("jpeg")
+    ? "jpg"
+    : "png";
+  const ts = Date.now();
+  const filename = `page-${idx}-${ts}.${ext}`;
   const absPath = path.join(imgDir, filename);
   await fs.writeFile(absPath, buffer);
   const page = getPage(state, idx);
   page.imagePath = absPath;
-  page.mimeType = mimeType || 'image/png';
+  page.mimeType = mimeType || "image/png";
+  // Also upload to R2 (if configured) and store a public URL for the client
+  try {
+    const bucket = process.env.R2_BUCKET_NAME;
+    if (bucket) {
+      const key = `uploads/sessions/${id}/${filename}`;
+      const loc = await uploadBufferToR2(buffer, bucket, key, page.mimeType);
+      const domain = process.env.DOMAIN;
+      page.imageUrl = domain ? `https://${domain}/${key}` : loc;
+      if (process.env.NODE_ENV === "development") {
+        console.log("[DEV] R2 page image upload OK", {
+          sessionId: id,
+          idx,
+          key,
+          url: page.imageUrl,
+          mimeType: page.mimeType,
+        });
+      }
+    } else {
+      if (process.env.NODE_ENV === "development") {
+        console.log(
+          "[DEV] R2 disabled for page image (missing R2_BUCKET_NAME). Using local only.",
+          {
+            sessionId: id,
+            idx,
+            path: absPath,
+          }
+        );
+      }
+    }
+  } catch (e) {
+    // Non-fatal: keep local path if upload fails
+    console.warn("R2 upload failed for page image", {
+      id,
+      idx,
+      error: (e as any)?.message || e,
+    });
+    if (process.env.NODE_ENV === "development") {
+      console.warn("[DEV] Falling back to local image for page", {
+        sessionId: id,
+        idx,
+        path: absPath,
+      });
+    }
+  }
   await saveSession(state);
   return { state, imagePath: absPath };
 }
 
-export async function markConfirmed(id: string, idx: number, confirmed: boolean): Promise<SessionState> {
+export async function markConfirmed(
+  id: string,
+  idx: number,
+  confirmed: boolean
+): Promise<SessionState> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const page = getPage(state, idx);
   page.confirmed = confirmed;
   await saveSession(state);
   return state;
 }
 
-export async function getLastTwoPrevImages(id: string, idx: number): Promise<{ buffer: Buffer; mimeType?: string }[]> {
+export async function getLastTwoPrevImages(
+  id: string,
+  idx: number
+): Promise<{ buffer: Buffer; mimeType?: string }[]> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const all: SessionPageState[] = [state.cover, ...state.items];
-  const prev = all.slice(0, idx).filter(p => !!p.imagePath);
+  const prev = all.slice(0, idx).filter((p) => !!p.imagePath);
   const lastTwo = prev.slice(-2);
   const out: { buffer: Buffer; mimeType?: string }[] = [];
   for (const p of lastTwo) {
@@ -206,9 +299,13 @@ export async function getLastTwoPrevImages(id: string, idx: number): Promise<{ b
   return out;
 }
 
-export async function getLastPrevImages(id: string, idx: number, count: number = 2): Promise<{ buffer: Buffer; mimeType?: string }[]> {
+export async function getLastPrevImages(
+  id: string,
+  idx: number,
+  count: number = 2
+): Promise<{ buffer: Buffer; mimeType?: string }[]> {
   const state = await loadSession(id);
-  if (!state) throw new Error('Session not found');
+  if (!state) throw new Error("Session not found");
   const all: SessionPageState[] = [state.cover, ...state.items];
   const prev = all.slice(0, idx).filter((p) => !!p.imagePath);
   const lastN = prev.slice(-Math.max(1, Math.floor(count)));
@@ -229,7 +326,8 @@ export function toPublicSession(state: SessionState) {
     prompt: p.prompt,
     text: p.text,
     confirmed: !!p.confirmed,
-    imageUrl: p.imagePath ? toPublicUrl(p.imagePath) : undefined,
+    imageUrl:
+      p.imageUrl || (p.imagePath ? toPublicUrl(p.imagePath) : undefined),
   });
   return {
     id: state.id,
